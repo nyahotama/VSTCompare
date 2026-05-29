@@ -1064,6 +1064,22 @@ void addObservation(LlmTestSummary& summary, const std::string& observation) {
   appendUnique(summary.observations, observation);
 }
 
+std::string directionPhrase(double value, const std::string& positive, const std::string& negative,
+                            const std::string& neutral = "matches") {
+  value = cleanNumber(value);
+  if (std::fabs(value) < 1.0e-9) return neutral;
+  return value > 0.0 ? positive : negative;
+}
+
+std::string pluginADirection(double value, const std::string& positive, const std::string& negative) {
+  return "Plugin A is " + directionPhrase(value, positive, negative) + " than Plugin B";
+}
+
+std::string signedDirectionSentence(double value, const std::string& positive, const std::string& negative,
+                                    const std::string& unit) {
+  return pluginADirection(value, positive, negative) + " by " + formatValue(std::fabs(cleanNumber(value)), unit);
+}
+
 std::string levelForScore(double score, double small, double moderate, double large) {
   score = std::fabs(cleanNumber(score));
   if (score < small) return "none";
@@ -1166,16 +1182,17 @@ LlmTestSummary buildIrLlmSummary(const RunSummary& summary) {
   out.differenceLevel =
       levelForIr(result.metrics.peakAbsDelta, result.metrics.energyDelta, result.metrics.estimatedLatencyMs);
   out.headline = "IR peak delta is " + formatNumber(result.metrics.peakAbsDelta) + ", energy delta is " +
-                 formatNumber(result.metrics.energyDelta) + ", with " +
-                 formatValue(result.metrics.estimatedLatencyMs, "ms") + " estimated A-B latency.";
+                 formatNumber(result.metrics.energyDelta) + ", and " +
+                 signedDirectionSentence(result.metrics.estimatedLatencyMs, "later", "earlier", "ms") +
+                 " after latency estimation.";
 
   addMetric(out, "peakAbsDelta", result.metrics.peakAbsDelta, "");
   addMetric(out, "energyDelta", result.metrics.energyDelta, "");
   addMetric(out, "estimatedLatencyMs", result.metrics.estimatedLatencyMs, "ms");
   addObservation(out, "Peak |A-B| is " + formatNumber(result.metrics.peakAbsDelta) + ".");
   addObservation(out, "Energy(A-B) is " + formatNumber(result.metrics.energyDelta) + ".");
-  addObservation(out, "Estimated residual A-B latency is " +
-                          formatValue(result.metrics.estimatedLatencyMs, "ms") + ".");
+  addObservation(out, signedDirectionSentence(result.metrics.estimatedLatencyMs, "later", "earlier", "ms") +
+                          " in estimated residual latency.");
 
   std::vector<RankedRegion> ranked;
   for (const auto& diff : result.topDifferences) {
@@ -1185,7 +1202,7 @@ LlmTestSummary buildIrLlmSummary(const RunSummary& summary) {
                           : 0.0;
     ranked.push_back({std::fabs(diff.absoluteDelta),
                       {formatValue(ms, "ms") + " (sample " + std::to_string(diff.sampleIndex) + ")",
-                       "largest impulse delta", diff.absoluteDelta, ""}});
+                       "largest absolute impulse mismatch at this time index", diff.absoluteDelta, ""}});
   }
   keepTopRegions(out.notableRegions, ranked, 3);
   return out;
@@ -1204,20 +1221,21 @@ LlmTestSummary buildFrequencyLlmSummary(const RunSummary& summary) {
                             result.normalizedSpectrumB.empty() && result.delta.empty();
   out.status = statusFrom(insufficient, out.warnings);
   out.differenceLevel = levelForScore(result.metrics.meanAbsDeltaDb, 0.5, 2.0, 6.0);
+  double signedBandAverage = 0.0;
+  const std::string coarseBand = strongestCoarseBand(result.octaveBands, &signedBandAverage);
   out.headline = "Frequency response mean |delta| is " +
                  formatValue(result.metrics.meanAbsDeltaDb, "dB") + " with a peak |delta| of " +
-                 formatValue(result.metrics.peakAbsDeltaDb, "dB") + ".";
+                 formatValue(result.metrics.peakAbsDeltaDb, "dB") +
+                 (coarseBand.empty() ? "." : "; " + signedDirectionSentence(signedBandAverage, "higher", "lower", "dB") +
+                                                " in the " + coarseBand + " range.");
 
   addMetric(out, "meanAbsDeltaDb", result.metrics.meanAbsDeltaDb, "dB");
   addMetric(out, "peakAbsDeltaDb", result.metrics.peakAbsDeltaDb, "dB");
   addMetric(out, "estimatedLatencyMs", result.metrics.estimatedLatencyMs, "ms");
   addObservation(out, "Average tonal difference is " + formatValue(result.metrics.meanAbsDeltaDb, "dB") + ".");
-  double signedBandAverage = 0.0;
-  const std::string coarseBand = strongestCoarseBand(result.octaveBands, &signedBandAverage);
   if (!coarseBand.empty()) {
-    addObservation(out, "The largest coarse-band average is in the " + coarseBand + " range, where Plugin A is " +
-                            std::string(signedBandAverage >= 0.0 ? "higher" : "lower") + " by about " +
-                            formatValue(std::fabs(signedBandAverage), "dB") + ".");
+    addObservation(out, "The strongest coarse-band tonal difference is in the " + coarseBand + " range, where " +
+                            signedDirectionSentence(signedBandAverage, "higher", "lower", "dB") + ".");
   }
 
   std::vector<RankedRegion> ranked;
@@ -1226,7 +1244,8 @@ LlmTestSummary buildFrequencyLlmSummary(const RunSummary& summary) {
     const double maxDelta = cleanNumber(band.maxDeltaDb);
     const double value = std::fabs(maxDelta) >= std::fabs(avg) ? maxDelta : avg;
     ranked.push_back({std::max(std::fabs(avg), std::fabs(maxDelta)),
-                      {formatHz(band.centerHz) + " band", "largest frequency-response delta", value, "dB"}});
+                      {formatHz(band.centerHz) + " band",
+                       pluginADirection(value, "higher", "lower") + " in this frequency band", value, "dB"}});
   }
   keepTopRegions(out.notableRegions, ranked, 3);
   return out;
@@ -1245,9 +1264,15 @@ LlmTestSummary buildPhaseLlmSummary(const RunSummary& summary) {
   out.differenceLevel = levelForScore(result.metrics.meanAbsDeltaRad, 0.1, 0.5, 1.0);
   const double meanDeg = result.metrics.meanAbsDeltaRad * 180.0 / kPi;
   const double peakDeg = result.metrics.peakAbsDeltaRad * 180.0 / kPi;
+  double signedPhaseSum = 0.0;
+  for (const auto& band : result.bands) signedPhaseSum += cleanNumber(band.avgDeltaRad);
+  const double signedPhaseAverage =
+      result.bands.empty() ? 0.0 : signedPhaseSum / static_cast<double>(result.bands.size());
   out.headline = "Phase mean |delta| is " + formatValue(result.metrics.meanAbsDeltaRad, "rad") + " (" +
                  formatValue(meanDeg, "deg") + "), with a peak of " +
-                 formatValue(result.metrics.peakAbsDeltaRad, "rad") + " (" + formatValue(peakDeg, "deg") + ").";
+                 formatValue(result.metrics.peakAbsDeltaRad, "rad") + " (" + formatValue(peakDeg, "deg") +
+                 "); " + signedDirectionSentence(signedPhaseAverage, "more positive in phase", "more negative in phase", "rad") +
+                 " on average across phase bands.";
 
   addMetric(out, "meanAbsDeltaRad", result.metrics.meanAbsDeltaRad, "rad");
   addMetric(out, "peakAbsDeltaRad", result.metrics.peakAbsDeltaRad, "rad");
@@ -1256,6 +1281,11 @@ LlmTestSummary buildPhaseLlmSummary(const RunSummary& summary) {
                           formatValue(meanDeg, "deg") + ").");
   addObservation(out, "Peak phase difference is " + formatValue(result.metrics.peakAbsDeltaRad, "rad") + " (" +
                           formatValue(peakDeg, "deg") + ").");
+  if (!result.bands.empty()) {
+    addObservation(out, signedDirectionSentence(signedPhaseAverage, "more positive in phase", "more negative in phase",
+                                                "rad") +
+                            " on average across phase bands.");
+  }
 
   std::vector<RankedRegion> ranked;
   for (const auto& band : result.bands) {
@@ -1263,7 +1293,10 @@ LlmTestSummary buildPhaseLlmSummary(const RunSummary& summary) {
     const double maxDelta = cleanNumber(band.maxDeltaRad);
     const double value = std::fabs(maxDelta) >= std::fabs(avg) ? maxDelta : avg;
     ranked.push_back({std::max(std::fabs(avg), std::fabs(maxDelta)),
-                      {formatHz(band.centerHz) + " band", "largest phase delta", value, "rad"}});
+                      {formatHz(band.centerHz) + " band",
+                       pluginADirection(value, "more positive in phase", "more negative in phase") +
+                           " in this phase band",
+                       value, "rad"}});
   }
   keepTopRegions(out.notableRegions, ranked, 3);
   return out;
@@ -1289,8 +1322,11 @@ LlmTestSummary buildHarmonicLlmSummary(const RunSummary& summary) {
   double oddSum = 0.0;
   double highSum = 0.0;
   double lowOrderSum = 0.0;
+  double signedOrderSum = 0.0;
+  int signedOrderCount = 0;
   double largestPitchScore = 0.0;
   double largestPitchHz = 0.0;
+  double largestPitchSignedDelta = 0.0;
   double largestNoiseFloorDelta = 0.0;
   std::vector<RankedRegion> ranked;
   for (const auto& pitch : result.pitches) {
@@ -1302,6 +1338,8 @@ LlmTestSummary buildHarmonicLlmSummary(const RunSummary& summary) {
     for (const auto& order : pitch.orders) {
       hasOrders = true;
       const double absDelta = std::fabs(cleanNumber(order.deltaDb));
+      signedOrderSum += cleanNumber(order.deltaDb);
+      signedOrderCount += 1;
       pitchScore = std::max(pitchScore, absDelta);
       if (order.order >= 2 && order.order <= 10) {
         if (order.order % 2 == 0) {
@@ -1317,17 +1355,32 @@ LlmTestSummary buildHarmonicLlmSummary(const RunSummary& summary) {
       }
       ranked.push_back({absDelta,
                         {formatHz(pitch.fundamentalHz) + " fundamental, " + ordinal(order.order) + " harmonic",
-                         "largest harmonic-order delta", order.deltaDb, "dB"}});
+                         pluginADirection(order.deltaDb, "stronger", "weaker") +
+                             " for this harmonic order",
+                         order.deltaDb, "dB"}});
     }
     if (pitchScore > largestPitchScore) {
       largestPitchScore = pitchScore;
       largestPitchHz = pitch.fundamentalHz;
+      for (const auto& order : pitch.orders) {
+        if (std::fabs(cleanNumber(order.deltaDb)) == pitchScore) {
+          largestPitchSignedDelta = order.deltaDb;
+          break;
+        }
+      }
     }
   }
 
   if (largestPitchScore > 0.0) {
     addObservation(out, "The largest harmonic-order difference appears around the " + formatHz(largestPitchHz) +
-                            " fundamental.");
+                            " fundamental, where " +
+                            signedDirectionSentence(largestPitchSignedDelta, "stronger", "weaker", "dB") + ".");
+  }
+  if (signedOrderCount > 0) {
+    out.headline += " Across harmonic orders, " +
+                    signedDirectionSentence(signedOrderSum / static_cast<double>(signedOrderCount), "stronger",
+                                            "weaker", "dB") +
+                    " on average.";
   }
   if (evenSum > oddSum * 1.15) {
     addObservation(out, "Even-order harmonics carry more aggregate delta than odd-order harmonics.");
@@ -1355,8 +1408,32 @@ LlmTestSummary buildThdLlmSummary(const RunSummary& summary) {
   const double score = std::max(std::fabs(result.metrics.meanAbsThdDeltaPercent),
                                 std::fabs(result.metrics.meanAbsThdnDeltaPercent));
   out.differenceLevel = levelForScore(score, 0.01, 0.1, 1.0);
-  out.headline = "THD mean delta is " + formatValue(result.metrics.meanAbsThdDeltaPercent, "pt") +
-                 " and THD+N mean delta is " + formatValue(result.metrics.meanAbsThdnDeltaPercent, "pt") + ".";
+  double signedThdSum = 0.0;
+  double signedThdnSum = 0.0;
+  int signedSweepCount = 0;
+  for (const auto& point : result.sweep) {
+    signedThdSum += cleanNumber(point.thdDeltaPercent);
+    signedThdnSum += cleanNumber(point.thdnDeltaPercent);
+    signedSweepCount += 1;
+  }
+  double signedThdDirection = 0.0;
+  double signedThdnDirection = 0.0;
+  if (signedSweepCount > 0) {
+    signedThdDirection = signedThdSum / static_cast<double>(signedSweepCount);
+    signedThdnDirection = signedThdnSum / static_cast<double>(signedSweepCount);
+  } else if (!result.segments.empty()) {
+    for (const auto& segment : result.segments) {
+      signedThdDirection += cleanNumber(segment.avgThdDeltaPercent);
+      signedThdnDirection += cleanNumber(segment.avgThdnDeltaPercent);
+    }
+    signedThdDirection /= static_cast<double>(result.segments.size());
+    signedThdnDirection /= static_cast<double>(result.segments.size());
+  }
+  out.headline = "THD mean |delta| is " + formatValue(result.metrics.meanAbsThdDeltaPercent, "pt") +
+                 " and THD+N mean |delta| is " + formatValue(result.metrics.meanAbsThdnDeltaPercent, "pt") +
+                 "; " + signedDirectionSentence(signedThdDirection, "higher in THD", "lower in THD", "pt") +
+                 " and " + signedDirectionSentence(signedThdnDirection, "higher in THD+N", "lower in THD+N", "pt") +
+                 ".";
 
   addMetric(out, "meanAbsThdDeltaPercent", result.metrics.meanAbsThdDeltaPercent, "pt");
   addMetric(out, "meanAbsThdnDeltaPercent", result.metrics.meanAbsThdnDeltaPercent, "pt");
@@ -1366,14 +1443,24 @@ LlmTestSummary buildThdLlmSummary(const RunSummary& summary) {
                               std::fabs(result.metrics.meanAbsThdDeltaPercent)
                           ? "THD+N delta is the larger average distortion difference."
                           : "THD delta is the larger average distortion difference.");
+  addObservation(out, signedDirectionSentence(signedThdDirection, "higher in THD", "lower in THD", "pt") +
+                          " on average.");
+  addObservation(out, signedDirectionSentence(signedThdnDirection, "higher in THD+N", "lower in THD+N", "pt") +
+                          " on average.");
 
   std::vector<RankedRegion> ranked;
   for (const auto& segment : result.segments) {
     const double thd = std::fabs(cleanNumber(segment.maxAbsThdDeltaPercent));
     const double thdn = std::fabs(cleanNumber(segment.maxAbsThdnDeltaPercent));
+    const bool useThdn = std::fabs(cleanNumber(segment.avgThdnDeltaPercent)) >=
+                         std::fabs(cleanNumber(segment.avgThdDeltaPercent));
+    const double signedValue = useThdn ? segment.avgThdnDeltaPercent : segment.avgThdDeltaPercent;
     ranked.push_back({std::max(thd, thdn),
-                      {segment.name + " input segment", "largest THD or THD+N segment delta",
-                       std::max(segment.maxAbsThdDeltaPercent, segment.maxAbsThdnDeltaPercent), "pt"}});
+                      {segment.name + " input segment",
+                       pluginADirection(signedValue, useThdn ? "higher in THD+N" : "higher in THD",
+                                        useThdn ? "lower in THD+N" : "lower in THD") +
+                           " in this input segment",
+                       signedValue, "pt"}});
   }
   if (!ranked.empty()) {
     std::sort(ranked.begin(), ranked.end(), [](const RankedRegion& a, const RankedRegion& b) {
@@ -1386,6 +1473,14 @@ LlmTestSummary buildThdLlmSummary(const RunSummary& summary) {
     appendWarnings(out.warnings, point.warnings);
     appendLatencyWarnings(out.warnings, point.latencyAlignment,
                           "THD sweep latency alignment clamped reported latency to the available sample window.");
+    const bool useThdn = std::fabs(cleanNumber(point.thdnDeltaPercent)) >= std::fabs(cleanNumber(point.thdDeltaPercent));
+    const double signedValue = useThdn ? point.thdnDeltaPercent : point.thdDeltaPercent;
+    ranked.push_back({std::fabs(signedValue),
+                      {formatValue(point.inputLevelDbfs, "dBFS") + " sweep point",
+                       pluginADirection(signedValue, useThdn ? "higher in THD+N" : "higher in THD",
+                                        useThdn ? "lower in THD+N" : "lower in THD") +
+                           " at this input level",
+                       signedValue, "pt"}});
   }
   out.status = statusFrom(result.sweep.empty() && result.segments.empty(), out.warnings);
   keepTopRegions(out.notableRegions, ranked, 3);
@@ -1405,26 +1500,34 @@ LlmTestSummary buildWidthLlmSummary(const RunSummary& summary) {
   const double score = std::max(std::fabs(result.metrics.meanAbsBandDeltaWidthPercent),
                                 std::fabs(result.metrics.meanAbsTimeDeltaWidthPercent));
   out.differenceLevel = levelForScore(score, 2.0, 10.0, 25.0);
+  double signedTimeSum = 0.0;
+  for (const auto& point : result.timeSeries) signedTimeSum += cleanNumber(point.deltaWidthPercent);
+  const double signedTimeAverage =
+      result.timeSeries.empty() ? 0.0 : signedTimeSum / static_cast<double>(result.timeSeries.size());
+  double signedBandSum = 0.0;
+  for (const auto& band : result.bands) signedBandSum += cleanNumber(band.deltaWidthPercent);
+  const double signedBandAverage =
+      result.bands.empty() ? 0.0 : signedBandSum / static_cast<double>(result.bands.size());
+  const double signedWidthHeadline = result.bands.empty() ? signedTimeAverage : signedBandAverage;
   out.headline = "Width mean delta is " + formatValue(result.metrics.meanAbsTimeDeltaWidthPercent, "pt") +
                  " over time and " + formatValue(result.metrics.meanAbsBandDeltaWidthPercent, "pt") +
-                 " across bands.";
+                 " across bands; " + signedDirectionSentence(signedWidthHeadline, "wider", "narrower", "pt") +
+                 (result.bands.empty() ? " on average over time." : " on average across bands.");
 
   addMetric(out, "meanAbsTimeDeltaWidthPercent", result.metrics.meanAbsTimeDeltaWidthPercent, "pt");
   addMetric(out, "peakAbsTimeDeltaWidthPercent", result.metrics.peakAbsTimeDeltaWidthPercent, "pt");
   addMetric(out, "meanAbsBandDeltaWidthPercent", result.metrics.meanAbsBandDeltaWidthPercent, "pt");
   addMetric(out, "peakAbsBandDeltaWidthPercent", result.metrics.peakAbsBandDeltaWidthPercent, "pt");
   addObservation(out, "Time-domain width mean |delta| is " +
-                          formatValue(result.metrics.meanAbsTimeDeltaWidthPercent, "pt") + ".");
+                          formatValue(result.metrics.meanAbsTimeDeltaWidthPercent, "pt") + "; " +
+                          signedDirectionSentence(signedTimeAverage, "wider", "narrower", "pt") + " over time.");
   addObservation(out, "Band width mean |delta| is " +
-                          formatValue(result.metrics.meanAbsBandDeltaWidthPercent, "pt") + ".");
+                          formatValue(result.metrics.meanAbsBandDeltaWidthPercent, "pt") + "; " +
+                          signedDirectionSentence(signedBandAverage, "wider", "narrower", "pt") + " across bands.");
 
-  double signedBandSum = 0.0;
-  for (const auto& band : result.bands) signedBandSum += cleanNumber(band.deltaWidthPercent);
   if (!result.bands.empty()) {
-    const double signedAverage = signedBandSum / static_cast<double>(result.bands.size());
-    addObservation(out, "Across bands, Plugin A is generally " +
-                            std::string(signedAverage >= 0.0 ? "wider" : "narrower") + " by about " +
-                            formatValue(std::fabs(signedAverage), "pt") + ".");
+    addObservation(out, "Across bands, " + signedDirectionSentence(signedBandAverage, "wider", "narrower", "pt") +
+                            ".");
   }
 
   std::vector<RankedRegion> ranked;
@@ -1432,11 +1535,15 @@ LlmTestSummary buildWidthLlmSummary(const RunSummary& summary) {
     ranked.push_back({std::fabs(cleanNumber(band.deltaWidthPercent)),
                       {formatHz(band.centerHz) + " band", "largest band width delta",
                        band.deltaWidthPercent, "pt"}});
+    ranked.back().region.reason =
+        pluginADirection(band.deltaWidthPercent, "wider", "narrower") + " in this width band";
   }
   for (const auto& point : result.timeSeries) {
     ranked.push_back({std::fabs(cleanNumber(point.deltaWidthPercent)),
                       {formatValue(point.timeMs, "ms"), "largest time-domain width delta",
                        point.deltaWidthPercent, "pt"}});
+    ranked.back().region.reason =
+        pluginADirection(point.deltaWidthPercent, "wider", "narrower") + " at this time point";
   }
   out.status = statusFrom(result.bands.empty() && result.timeSeries.empty(), out.warnings);
   keepTopRegions(out.notableRegions, ranked, 3);
@@ -1457,8 +1564,15 @@ LlmTestSummary buildPitchLlmSummary(const RunSummary& summary) {
   }
   out.status = statusFrom(result.curve.empty(), out.warnings);
   out.differenceLevel = levelForScore(result.metrics.meanAbsDeltaHz, 2.0, 10.0, 50.0);
+  double signedPitchSum = 0.0;
+  for (const auto& point : result.curve) signedPitchSum += cleanNumber(point.pitchHzA - point.pitchHzB);
+  const double signedPitchAverage =
+      result.curve.empty() ? 0.0 : signedPitchSum / static_cast<double>(result.curve.size());
+  const double trackingErrorDelta = cleanNumber(result.metrics.meanAbsErrorHzA - result.metrics.meanAbsErrorHzB);
   out.headline = "Pitch A-B mean |delta| is " + formatValue(result.metrics.meanAbsDeltaHz, "Hz") +
                  " with a peak |delta| of " + formatValue(result.metrics.peakAbsDeltaHz, "Hz") +
+                 "; " + signedDirectionSentence(signedPitchAverage, "sharper", "flatter", "Hz") +
+                 " on average versus Plugin B" +
                  "; valid frame rates are A " + formatNumber(result.metrics.validFrameRateA) + " and B " +
                  formatNumber(result.metrics.validFrameRateB) + ".";
 
@@ -1471,15 +1585,22 @@ LlmTestSummary buildPitchLlmSummary(const RunSummary& summary) {
   addObservation(out, "Plugin A mean tracking error is " + formatValue(result.metrics.meanAbsErrorHzA, "Hz") +
                           "; Plugin B mean tracking error is " +
                           formatValue(result.metrics.meanAbsErrorHzB, "Hz") + ".");
+  addObservation(out, signedDirectionSentence(trackingErrorDelta, "less accurate relative to the input", "more accurate relative to the input",
+                                              "Hz") +
+                          " in mean tracking error.");
   addObservation(out, "A/B pitch divergence averages " + formatValue(result.metrics.meanAbsDeltaHz, "Hz") +
                           " and peaks at " + formatValue(result.metrics.peakAbsDeltaHz, "Hz") + ".");
+  if (!result.curve.empty()) {
+    addObservation(out, signedDirectionSentence(signedPitchAverage, "sharper", "flatter", "Hz") +
+                            " on average versus Plugin B.");
+  }
 
   std::vector<RankedRegion> ranked;
   for (const auto& point : result.curve) {
     const double delta = cleanNumber(point.pitchHzA - point.pitchHzB);
     ranked.push_back({std::fabs(delta),
                       {formatValue(point.timeMs, "ms") + ", input " + formatHz(point.inputHz),
-                       "largest pitch tracking delta", delta, "Hz"}});
+                       pluginADirection(delta, "sharper", "flatter") + " at this sweep point", delta, "Hz"}});
   }
   keepTopRegions(out.notableRegions, ranked, 3);
   return out;
@@ -1501,9 +1622,23 @@ LlmTestSummary buildDynamicsLlmSummary(const RunSummary& summary) {
                                 std::fabs(result.metrics.meanAbsGainReductionDeltaDb));
   out.status = statusFrom(result.ioCurve.empty(), out.warnings);
   out.differenceLevel = levelForScore(score, 0.5, 2.0, 6.0);
+  double signedOutputSum = 0.0;
+  double signedGrSum = 0.0;
+  for (const auto& point : result.ioCurve) {
+    signedOutputSum += cleanNumber(point.outputDeltaDb);
+    signedGrSum += cleanNumber(point.gainReductionDeltaDb);
+  }
+  const double signedOutputAverage =
+      result.ioCurve.empty() ? 0.0 : signedOutputSum / static_cast<double>(result.ioCurve.size());
+  const double signedGrAverage =
+      result.ioCurve.empty() ? 0.0 : signedGrSum / static_cast<double>(result.ioCurve.size());
   out.headline = "Dynamics mean output delta is " + formatValue(result.metrics.meanAbsOutputDeltaDb, "dB") +
                  " and mean gain-reduction delta is " +
-                 formatValue(result.metrics.meanAbsGainReductionDeltaDb, "dB") + ".";
+                 formatValue(result.metrics.meanAbsGainReductionDeltaDb, "dB") + "; " +
+                 signedDirectionSentence(result.metrics.thresholdDeltaDb, "higher in threshold", "lower in threshold", "dB") +
+                 " and " + signedDirectionSentence(signedGrAverage, "stronger in gain reduction", "weaker in gain reduction",
+                                                    "dB") +
+                 " across sampled levels.";
 
   addMetric(out, "meanAbsOutputDeltaDb", result.metrics.meanAbsOutputDeltaDb, "dB");
   addMetric(out, "peakAbsOutputDeltaDb", result.metrics.peakAbsOutputDeltaDb, "dB");
@@ -1512,17 +1647,19 @@ LlmTestSummary buildDynamicsLlmSummary(const RunSummary& summary) {
   addMetric(out, "thresholdDeltaDb", result.metrics.thresholdDeltaDb, "dB");
   addMetric(out, "ratioDelta", result.metrics.ratioDelta, "");
   addMetric(out, "kneeWidthDeltaDb", result.metrics.kneeWidthDeltaDb, "dB");
-  addObservation(out, "Estimated threshold delta is " + formatValue(result.metrics.thresholdDeltaDb, "dB") + ".");
-  addObservation(out, "Estimated ratio delta is " + formatNumber(result.metrics.ratioDelta) + ".");
-  addObservation(out, "Estimated knee-width delta is " + formatValue(result.metrics.kneeWidthDeltaDb, "dB") + ".");
+  addObservation(out, "Estimated threshold: " +
+                          signedDirectionSentence(result.metrics.thresholdDeltaDb, "higher", "lower", "dB") + ".");
+  addObservation(out, "Estimated ratio: " +
+                          signedDirectionSentence(result.metrics.ratioDelta, "higher", "lower", "") + ".");
+  addObservation(out, "Estimated knee width: " +
+                          signedDirectionSentence(result.metrics.kneeWidthDeltaDb, "wider", "narrower", "dB") + ".");
+  addObservation(out, "Average output curve: " +
+                          signedDirectionSentence(signedOutputAverage, "higher", "lower", "dB") + ".");
 
-  double signedGrSum = 0.0;
-  for (const auto& point : result.ioCurve) signedGrSum += cleanNumber(point.gainReductionDeltaDb);
   if (!result.ioCurve.empty()) {
-    const double avg = signedGrSum / static_cast<double>(result.ioCurve.size());
-    addObservation(out, "Across sampled levels, Plugin A shows " +
-                            std::string(avg >= 0.0 ? "more" : "less") +
-                            " gain reduction than Plugin B by about " + formatValue(std::fabs(avg), "dB") + ".");
+    addObservation(out, "Across sampled levels, " +
+                            signedDirectionSentence(signedGrAverage, "stronger in gain reduction",
+                                                    "weaker in gain reduction", "dB") + ".");
   }
 
   std::vector<RankedRegion> ranked;
@@ -1531,8 +1668,11 @@ LlmTestSummary buildDynamicsLlmSummary(const RunSummary& summary) {
     const double grDelta = cleanNumber(point.gainReductionDeltaDb);
     const bool useGr = std::fabs(grDelta) >= std::fabs(outDelta);
     ranked.push_back({std::max(std::fabs(outDelta), std::fabs(grDelta)),
-                      {formatValue(point.inputLevelDbfs, "dBFS"), useGr ? "largest gain-reduction delta"
-                                                                          : "largest output delta",
+                      {formatValue(point.inputLevelDbfs, "dBFS"),
+                       useGr ? pluginADirection(grDelta, "stronger in gain reduction", "weaker in gain reduction") +
+                                   " at this input level"
+                             : pluginADirection(outDelta, "higher in output level", "lower in output level") +
+                                   " at this input level",
                        useGr ? grDelta : outDelta, "dB"}});
   }
   keepTopRegions(out.notableRegions, ranked, 3);
@@ -1555,23 +1695,36 @@ LlmTestSummary buildTimeResponseLlmSummary(const RunSummary& summary) {
   out.differenceLevel = levelForScore(score, 2.0, 10.0, 50.0);
   out.headline = "Time response attack delta is " + formatValue(result.metrics.attackDeltaMs, "ms") +
                  ", release delta is " + formatValue(result.metrics.releaseDeltaMs, "ms") +
-                 ", and residual latency is " + formatValue(result.metrics.residualLatencyMs, "ms") + ".";
+                 ", and residual latency is " + formatValue(result.metrics.residualLatencyMs, "ms") +
+                 "; " + signedDirectionSentence(result.metrics.attackDeltaMs, "slower in attack", "faster in attack", "ms") +
+                 " and " + signedDirectionSentence(result.metrics.releaseDeltaMs, "longer in release", "shorter in release",
+                                                    "ms") +
+                 ".";
 
   addMetric(out, "residualLatencyMs", result.metrics.residualLatencyMs, "ms");
   addMetric(out, "attackDeltaMs", result.metrics.attackDeltaMs, "ms");
   addMetric(out, "releaseDeltaMs", result.metrics.releaseDeltaMs, "ms");
   addMetric(out, "postReleaseResidualDeltaDb", result.metrics.postReleaseResidualDeltaDb, "dB");
   addObservation(out, "Attack times are A " + formatValue(result.metrics.attackMsA, "ms") + " and B " +
-                          formatValue(result.metrics.attackMsB, "ms") + ".");
+                          formatValue(result.metrics.attackMsB, "ms") + "; " +
+                          signedDirectionSentence(result.metrics.attackDeltaMs, "slower", "faster", "ms") + ".");
   addObservation(out, "Release times are A " + formatValue(result.metrics.releaseMsA, "ms") + " and B " +
-                          formatValue(result.metrics.releaseMsB, "ms") + ".");
-  addObservation(out, "Post-release residual delta is " +
-                          formatValue(result.metrics.postReleaseResidualDeltaDb, "dB") + ".");
+                          formatValue(result.metrics.releaseMsB, "ms") + "; " +
+                          signedDirectionSentence(result.metrics.releaseDeltaMs, "longer", "shorter", "ms") + ".");
+  addObservation(out, "Residual latency indicates " +
+                          signedDirectionSentence(result.metrics.residualLatencyMs, "later", "earlier", "ms") + ".");
+  addObservation(out, "Post-release residual indicates " +
+                          signedDirectionSentence(result.metrics.postReleaseResidualDeltaDb, "higher in residual level",
+                                                  "lower in residual level", "dB") +
+                          ".");
 
   std::vector<RankedRegion> ranked;
   for (const auto& point : result.curve) {
     ranked.push_back({std::fabs(cleanNumber(point.deltaDb)),
-                      {formatValue(point.timeMs, "ms"), "largest envelope delta", point.deltaDb, "dB"}});
+                      {formatValue(point.timeMs, "ms"),
+                       pluginADirection(point.deltaDb, "higher in envelope level", "lower in envelope level") +
+                           " at this time point",
+                       point.deltaDb, "dB"}});
   }
   keepTopRegions(out.notableRegions, ranked, 3);
   return out;
@@ -1776,7 +1929,7 @@ std::string renderOverallSummaryHtml(const LlmOverallSummary& overall) {
 
 std::string renderTestSummaryHtml(const LlmTestSummary& test) {
   std::ostringstream html;
-  html << "<div class=\"card full\"><h2>LLM Summary</h2><table>"
+  html << "<div class=\"card full\"><h2>Summary For LLM</h2><table>"
        << "<tr><th>What was tested</th><td>" << escapeHtml(test.whatWasTested) << "</td></tr>"
        << "<tr><th>Main result</th><td>" << escapeHtml(test.headline) << "</td></tr>"
        << "<tr><th>Status</th><td>" << escapeHtml(test.status) << " / " << escapeHtml(test.differenceLevel)

@@ -226,9 +226,46 @@ int main() {
     std::cerr << "Time response delta metric is missing.\n";
     return 1;
   }
+  if (json.find("Plugin A is higher than Plugin B") == std::string::npos) {
+    std::cerr << "Directional frequency or dynamics wording is missing.\n";
+    return 1;
+  }
+  if (json.find("Plugin A is wider than Plugin B") == std::string::npos) {
+    std::cerr << "Directional width wording is missing.\n";
+    return 1;
+  }
+  if (json.find("Plugin A is sharper than Plugin B") == std::string::npos) {
+    std::cerr << "Directional pitch wording is missing.\n";
+    return 1;
+  }
+  if (json.find("Plugin A is stronger in gain reduction than Plugin B") == std::string::npos) {
+    std::cerr << "Directional dynamics wording is missing.\n";
+    return 1;
+  }
+  if (json.find("Plugin A is slower than Plugin B") == std::string::npos ||
+      json.find("Plugin A is longer than Plugin B") == std::string::npos) {
+    std::cerr << "Directional time-response wording is missing.\n";
+    return 1;
+  }
+  const std::size_t llmTestsPos = json.find("\"tests\":{");
+  const std::size_t llmPitchPos =
+      llmTestsPos == std::string::npos ? std::string::npos : json.find("\"pitch\":{\"status\":", llmTestsPos);
+  const std::size_t llmDynamicsPos =
+      llmPitchPos == std::string::npos ? std::string::npos : json.find("\"dynamics\":{\"status\":", llmPitchPos);
+  if (llmPitchPos == std::string::npos || llmDynamicsPos == std::string::npos) {
+    std::cerr << "LLM pitch summary section could not be located.\n";
+    return 1;
+  }
+  const std::string pitchSummary = json.substr(llmPitchPos, llmDynamicsPos - llmPitchPos);
+  if (pitchSummary.find("dBFS") != std::string::npos || pitchSummary.find("gain") != std::string::npos ||
+      pitchSummary.find("volume") != std::string::npos || pitchSummary.find("output level") != std::string::npos) {
+    std::cerr << "Pitch LLM summary contains non-pitch level wording.\n";
+    return 1;
+  }
 
   const std::string html = report.renderHtml(summary);
-  if (html.find("Final Summary") == std::string::npos || html.find("LLM Summary") == std::string::npos) {
+  if (html.find("Final Summary") == std::string::npos || html.find("Summary For LLM") == std::string::npos ||
+      html.find("LLM Summary") != std::string::npos) {
     std::cerr << "LLM summary HTML cards are missing.\n";
     return 1;
   }
