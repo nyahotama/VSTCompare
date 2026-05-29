@@ -1,0 +1,65 @@
+# Build outputs
+build/
+out/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+*.sln
+*.slnx
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.vcxproj.FileListAbsolute.txt
+*.dir/
+*.tlog/
+*.recipe
+*.obj
+*.pch
+*.pdb
+*.idb
+*.ilk
+*.exp
+*.lib
+*.dll
+*.exe
+DEVELOPMENT.md
+SummarySpecifications.md
+
+# Generated reports and local analysis output
+reports/
+*.html
+*.json
+
+# Third-party SDKs and local dependencies
+external/
+
+# Development-only plug-ins and proprietary/local binaries
+vsts-for-dev-only/
+*.vst3
+*.component
+*.aaxplugin
+
+# Local editor and IDE state
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.opensdf
+*.sdf
+
+# OS metadata
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*.bak
+*.swp
+~$*
